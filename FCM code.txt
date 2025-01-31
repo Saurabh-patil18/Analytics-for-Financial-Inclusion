@@ -1,0 +1,126 @@
+import pandas as pd
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+
+#Loading input data
+Inputmatrix = pd.read_csv(r'C:\Users\...\Desktop\Input.csv')
+Fuzzyscale = pd.read_csv(r'C:\Users\...\Desktop\Fuzzyscale.csv')
+Inputmatrix.fillna(0, inplace=True)
+
+#Obtaining the Fuzzy input matrix (Triangular Fuzzy Numbers are herein considered)
+def replace_with_fuzzy_numbers(value, fuzzy_scale):
+    if value == '0':
+        return '0,0,0'  #Keep zero as is
+    else:
+        fuzzy_row = fuzzy_scale.loc[fuzzy_scale['Variable'] == value]
+        if fuzzy_row.empty:
+            return '0,0,0'  
+        a = fuzzy_row['a'].values[0]
+        b = fuzzy_row['b'].values[0]
+        c = fuzzy_row['c'].values[0]
+        return f"{a},{b},{c}" 
+FuzzyInputmatrix = Inputmatrix.copy()
+for column in FuzzyInputmatrix.columns:
+    FuzzyInputmatrix[column] = FuzzyInputmatrix[column].apply(lambda x: replace_with_fuzzy_numbers(x, Fuzzyscale))
+    
+#Defuzzifying the Fuzzy input matrix based on the centroid (Wang et al., 2006)
+def defuzzify_fuzzy_number(fuzzy_number):
+    if fuzzy_number == '0':
+        return '0'  #Keep zero as is
+    else:
+        a, b, c = map(float, fuzzy_number.split(','))
+        return (a + b + c) / 3  
+CrispInputmatrix = FuzzyInputmatrix.copy()
+for column in CrispInputmatrix.columns:
+    CrispInputmatrix[column] = CrispInputmatrix[column].apply(lambda x: defuzzify_fuzzy_number(x))
+    
+#Calculating the Indirect Effects and the Total Effects for each element of the input matrix    
+IE_rows = np.min(np.where(CrispInputmatrix == 0, np.inf, CrispInputmatrix.astype(float)), axis=1)
+IE_columns = np.min(np.where(CrispInputmatrix == 0, np.inf, CrispInputmatrix.astype(float)), axis=0)
+IE_dataframe = pd.DataFrame({'Indirect_Effects_Rows': IE_rows, 'Indirect_Effects_Columns': IE_columns})
+TE = np.max(IE_dataframe, axis=1)
+TE_dataframe = pd.DataFrame({'Total_Effects': TE})
+
+#Ranking elements on the basis of their decreasing TE values
+TE_dataframe['Header_Values'] = Inputmatrix.columns
+TE_dataframe = TE_dataframe.sort_values(by='Total_Effects', ascending=False).reset_index(drop=True)
+
+#Recommending strategies to be implemented
+Measures = pd.read_csv(r'C:\Users\...\Desktop\Measures.csv', header=None)
+header_values = pd.DataFrame({'Header_Values': Inputmatrix.columns})
+Measures_dataframe = pd.concat([Measures, header_values], axis=1)
+TE_dataframe = TE_dataframe.merge(Measures_dataframe, on='Header_Values')
+
+max_te_value = TE_dataframe['Total_Effects'].max()
+max_te_elements = TE_dataframe[TE_dataframe['Total_Effects'] == max_te_value]
+strategies_columns = TE_dataframe.columns[TE_dataframe.columns.get_loc('Header_Values') + 1:]
+
+print("It is recommended the implementation of the following measures to optimize safety:")
+for index, row in max_te_elements.iterrows():
+    recommendations = [str(row[col]) for col in strategies_columns if not pd.isna(row[col])]
+    print(", ".join(recommendations))
+    
+# Creating the network of relationships
+G = nx.DiGraph()
+header_values = Inputmatrix.columns.tolist()
+G.add_nodes_from(header_values, labels=header_values)  # Adding node labels
+
+max_value = np.max(CrispInputmatrix.values)  # Find the highest value in the CrispInputmatrix
+for i, row in enumerate(CrispInputmatrix.values):
+    for j, value in enumerate(row):
+        if value != 0:  # Only add edge if value is not zero
+            source_node = header_values[i]
+            target_node = header_values[j]
+
+            # Determine edge color and weight based on the value in the input matrix
+            if value == max_value:  # Compare with the highest value
+                edge_color = 'darkblue'
+                edge_width = 3.0
+            else:
+                edge_color = 'darkgray'
+                edge_width = 2.5
+
+            if source_node != target_node:
+                G.add_edge(source_node, target_node, color=edge_color, width=edge_width)
+
+# Calculate total effect values for nodes
+IE_rows = np.min(np.where(CrispInputmatrix == 0, np.inf, CrispInputmatrix.astype(float)), axis=1)
+IE_columns = np.min(np.where(CrispInputmatrix == 0, np.inf, CrispInputmatrix.astype(float)), axis=0)
+IE_dataframe = pd.DataFrame({'Indirect_Effects_Rows': IE_rows, 'Indirect_Effects_Columns': IE_columns})
+TE = np.max(IE_dataframe, axis=1)
+TE_dataframe = pd.DataFrame({'Total_Effects': TE})
+
+# Rank nodes based on total effect values
+TE_dataframe['Header_Values'] = header_values
+TE_dataframe = TE_dataframe.sort_values(by='Total_Effects', ascending=False).reset_index(drop=True)
+
+# Calculate layout based on total effect values
+layout = {}
+unique_te_values = sorted(set(TE))
+for te in unique_te_values:
+    nodes_in_layer = TE_dataframe.loc[TE_dataframe['Total_Effects'] == te, 'Header_Values'].tolist()
+    num_nodes = len(nodes_in_layer)
+    x_coordinates = np.linspace(-1, 1, num_nodes)
+    for i, node in enumerate(nodes_in_layer):
+        layout[node] = (x_coordinates[i], -te)
+
+plt.figure(figsize=(15, 13))
+pos = layout
+
+# Draw edges
+for u, v, d in G.edges(data=True):
+    edge_color = d['color']
+    edge_width = d['width']
+    edge_alpha = 0.5 if edge_width == 3.0 else 0.5  # Adjust alpha based on edge width
+
+    nx.draw(G, pos, edgelist=[(u, v)], width=edge_width, alpha=edge_alpha, edge_color=edge_color,
+            connectionstyle="arc3,rad=0.2", arrows=True, arrowstyle='-|>', node_size=5000, font_size=10, font_weight='bold', font_color='black')
+
+# Draw node labels
+node_labels = {node: node for node in G.nodes}
+nx.draw_networkx_labels(G, pos, labels=node_labels, font_size=25, font_weight='bold', font_color='white')
+
+plt.axis('off')
+plt.gca().invert_yaxis()
+plt.show()
